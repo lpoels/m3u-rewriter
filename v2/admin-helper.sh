@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # admin-helper.sh
 # Interactive and non-interactive admin helper for the gateway
+# Prompts for ADMIN_KEY at startup (never stored in script).
 # Usage:
 #   ./admin-helper.sh            # interactive menu (prompts for ADMIN_KEY each run)
 #   ./admin-helper.sh health     # non-interactive single command
@@ -10,7 +11,6 @@ set -euo pipefail
 
 # Configuration
 BASE_URL="${BASE_URL:-http://10.8.2.4:8080}"
-
 CURL_OPTS="-sS --connect-timeout 5 --max-time 15"
 JQ_BIN="$(command -v jq || true)"
 
@@ -27,6 +27,7 @@ _do_curl() {
   local headers=(-H "$(_auth_header)")
   if [ -n "$data" ]; then
     headers+=(-H "Content-Type: application/json")
+    # echo the curl command to stderr for debugging
     echo curl $CURL_OPTS -X "$method" "${headers[@]}" -d "$data" "$BASE_URL$path" 1>&2
     curl $CURL_OPTS -X "$method" "${headers[@]}" -d "$data" "$BASE_URL$path"
   else
@@ -43,7 +44,7 @@ pretty_print() {
   fi
 }
 
-# Commands (ordered to match requested menu)
+# Commands (ordered per requested menu)
 cmd_health() {
   _do_curl GET "/health" | pretty_print
 }
@@ -76,12 +77,28 @@ cmd_remove_key() {
   _do_curl POST "/remove_key" "$payload" | pretty_print
 }
 
+cmd_unlatch_key() {
+  local key="${1:-}" prefix="${2:-}" payload
+  if [ -z "$key" ] && [ -z "$prefix" ]; then
+    read -r -p "Client key to unlatch (leave blank to use prefix): " key
+    if [ -z "$key" ]; then
+      read -r -p "Client key prefix to unlatch: " prefix
+    fi
+  fi
+  if [ -n "$key" ]; then
+    payload=$(printf '{"client_key":"%s"}' "$key")
+  else
+    payload=$(printf '{"client_key_prefix":"%s"}' "$prefix")
+  fi
+  _do_curl POST "/unlatch_key" "$payload" | pretty_print
+}
+
 cmd_list_urls() {
   _do_curl GET "/urls" | pretty_print
 }
 
 cmd_add_url() {
-  local url="${1:-}" pos="${2:-}"
+  local url="${1:-}" pos="${2:-}" payload
   if [ -z "$url" ]; then
     read -r -p "URL to add: " url
   fi
@@ -97,7 +114,7 @@ cmd_add_url() {
 }
 
 cmd_remove_url() {
-  local idx="${1:-}" url="${2:-}"
+  local idx="${1:-}" url="${2:-}" payload
   if [ -z "$idx" ] && [ -z "$url" ]; then
     read -r -p "Index to remove (leave blank to remove by URL): " idx
     if [ -z "$idx" ]; then
@@ -117,7 +134,7 @@ cmd_list_bans() {
 }
 
 cmd_remove_ban() {
-  local ip="${1:-}" ckey="${2:-}"
+  local ip="${1:-}" ckey="${2:-}" payload
   if [ -z "$ip" ] && [ -z "$ckey" ]; then
     read -r -p "IP to remove (leave blank to remove by key): " ip
     if [ -z "$ip" ]; then
@@ -145,12 +162,13 @@ print_menu() {
 3  List Client Keys
 4  Add Client Keys
 5  Remove Client Keys
-6  List URLs
-7  Add URLs
-8  Remove URLs
-9  List Bans
-10 Remove Ban
-11 Clear Cache
+6  Unlatch Client Key
+7  List URLs
+8  Add URLs
+9  Remove URLs
+10 List Bans
+11 Remove Ban
+12 Clear Cache
 0  Exit
 ===============================================
 MENU
@@ -166,6 +184,7 @@ if [ $# -ge 1 ]; then
     clients) clear; cmd_list_clients ;;
     add_key) clear; cmd_add_key "${1:-}" ;;
     remove_key) clear; cmd_remove_key "${1:-}" ;;
+    unlatch_key) clear; cmd_unlatch_key "${1:-}" "${2:-}" ;;
     urls) clear; cmd_list_urls ;;
     add_url) clear; cmd_add_url "${1:-}" "${2:-}" ;;
     remove_url) clear; cmd_remove_url "${1:-}" "${2:-}" ;;
@@ -187,12 +206,13 @@ while true; do
     3) clear; cmd_list_clients ;;
     4) clear; cmd_add_key ;;
     5) clear; cmd_remove_key ;;
-    6) clear; cmd_list_urls ;;
-    7) clear; cmd_add_url ;;
-    8) clear; cmd_remove_url ;;
-    9) clear; cmd_list_bans ;;
-    10) clear; cmd_remove_ban ;;
-    11) clear; cmd_clear_cache ;;
+    6) clear; cmd_unlatch_key ;;
+    7) clear; cmd_list_urls ;;
+    8) clear; cmd_add_url ;;
+    9) clear; cmd_remove_url ;;
+    10) clear; cmd_list_bans ;;
+    11) clear; cmd_remove_ban ;;
+    12) clear; cmd_clear_cache ;;
     0) clear; echo "Goodbye"; exit 0 ;;
     *) echo "Invalid choice"; sleep 1 ;;
   esac

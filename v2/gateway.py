@@ -1,5 +1,5 @@
 # Full server with keys.json admin endpoints, bans, rate limiting,
-# cache, request limits, logging, dynamic URLs management, and admin endpoints.
+# cache, request limits, logging, dynamic URLs management, key latching, and admin endpoints.
 
 import os
 import time
@@ -28,10 +28,16 @@ HTTP_PORT = int(os.getenv("HTTP_PORT", "8080"))
 # NEW_URLS will be loaded from urls.json at startup; environment variables
 # can provide initial defaults if urls.json does not exist.
 NEW_URLS = []
-for i in range(1, 26):
-    val = os.getenv(f"NEW_URL{i}")
-    if val:
-        NEW_URLS.append(val)
+
+# Load any NEW_URL<n> env variables (support arbitrary count)
+i = 1
+while True:
+    key = f"NEW_URL{i}"
+    val = os.getenv(key)
+    if not val:
+        break
+    NEW_URLS.append(val)
+    i += 1
 
 SOURCE_REFRESH_INTERVAL_SECONDS = int(os.getenv("SOURCE_REFRESH_INTERVAL_SECONDS", "1800"))
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "600"))
@@ -51,6 +57,9 @@ ENABLE_KEY_BAN = os.getenv("ENABLE_KEY_BAN", "true").lower() == "true"
 BAN_THRESHOLD = int(os.getenv("BAN_THRESHOLD", "10"))
 BAN_DURATION_SECONDS = int(os.getenv("BAN_DURATION_SECONDS", "3600"))
 BAD_EVENT_DECAY_SECONDS = int(os.getenv("BAD_EVENT_DECAY_SECONDS", "900"))
+
+# Latching behavior: if true, keys latch to the first username that uses them.
+LATCH_CLIENT_KEYS = os.getenv("LATCH_CLIENT_KEYS", "false").lower() == "true"
 
 TLS_PROBE_SUPPRESS_SECONDS = 3600
 tls_probe_last_seen = {}
@@ -160,6 +169,10 @@ def load_keys():
             keys_data.update(data)
             if "clients" not in keys_data:
                 keys_data["clients"] = {}
+            # Ensure latched_user exists for all clients
+            for v in keys_data.get("clients", {}).values():
+                if "latched_user" not in v:
+                    v["latched_user"] = None
     except Exception:
         logger.exception("Failed to load keys.json, initializing empty keys")
         with keys_lock:
@@ -475,30 +488,13 @@ def get_stats():
     source_age = now - source_cache["last_fetch"] if source_cache["text"] else None
     with rate_limit_lock:
         rate_ips = len(rate_limit_data)
-    ban_info = {"ips": {}, "keys": {}}
-    with ban_lock:
-        for ip, entry in ban_state["ips"].items():
-            decay_bad_events(entry)
-            remaining = max(0, int(entry["ban_until"] - now)) if entry["ban_until"] > now else None
-            ban_info["ips"][ip] = {
-                "bad_events": entry["bad_events"],
-                "banned": entry["ban_until"] > now,
-                "ban_expires_in": remaining
-            }
-        for key, entry in ban_state["keys"].items():
-            decay_bad_events(entry)
-            remaining = max(0, int(entry["ban_until"] - now)) if entry["ban_until"] > now else None
-            ban_info["keys"][key_prefix(key)] = {
-                "bad_events": entry["bad_events"],
-                "banned": entry["ban_until"] > now,
-                "ban_expires_in": remaining
-            }
+    # Do not include ban_state in health payload (use /bans endpoint)
     return {
         "health": "ok",
-        "uptime_seconds": int(uptime),
+        "uptime_minutes": int(uptime // 60),
         "auth_required": REQUIRE_AUTH_KEYS,
         "source_cached": source_cache["text"] is not None,
-        "source_age_seconds": int(source_age) if source_age else None,
+        "source_age_minutes": int(source_age // 60) if source_age else None,
         "cache_entries": cache_entries,
         "max_cache_users": MAX_CACHE_USERS,
         "cache_ttl_seconds": CACHE_TTL_SECONDS,
@@ -511,8 +507,7 @@ def get_stats():
         "enable_key_ban": ENABLE_KEY_BAN,
         "ban_threshold": BAN_THRESHOLD,
         "ban_duration_seconds": BAN_DURATION_SECONDS,
-        "bad_event_decay_seconds": BAD_EVENT_DECAY_SECONDS,
-        "ban_state": ban_info
+        "bad_event_decay_seconds": BAD_EVENT_DECAY_SECONDS
     }
 
 # -------------------------
@@ -825,6 +820,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self.handle_remove_url_post(body_json)
             return
 
+        if path == "/unlatch_key":
+            if not admin_key or admin_key != ADMIN_KEY:
+                record_bad_event(ip=self.client_address[0], key=None, reason="invalid_admin_key")
+                self.send_response(401)
+                self.end_headers()
+                return
+            self.handle_unlatch_key_post(body_json)
+            return
+
         try:
             self.send_response(404)
             self.end_headers()
@@ -838,12 +842,6 @@ class GatewayHandler(BaseHTTPRequestHandler):
     def handle_get(self, query):
         ip = self.client_address[0]
         key = query.get("key", [None])[0]
-
-        if not self.is_valid_client_key(key):
-            record_bad_event(ip=ip, key=key, reason="invalid_client_key")
-            self.send_response(401)
-            self.end_headers()
-            return
 
         if rate_limited(ip):
             record_bad_event(ip=ip, key=key, reason="rate_limited")
@@ -865,6 +863,71 @@ class GatewayHandler(BaseHTTPRequestHandler):
         url_index_key = None
         filename_suffix = None
 
+        # --- Authentication and latching logic ---
+        # If IP or key is banned, block early (already checked in do_GET)
+        # Latching behavior:
+        if not LATCH_CLIENT_KEYS:
+            # Original behavior: require valid client key if auth required
+            if REQUIRE_AUTH_KEYS and not self.is_valid_client_key(key):
+                record_bad_event(ip=ip, key=key, reason="invalid_client_key")
+                self.send_response(401)
+                self.end_headers()
+                return
+        else:
+            # Latching enabled
+            if key:
+                with keys_lock:
+                    clients = keys_data.get("clients", {})
+                    entry = clients.get(key)
+                    if not entry:
+                        record_bad_event(ip=ip, key=key, reason="invalid_client_key")
+                        self.send_response(401)
+                        self.end_headers()
+                        return
+                    # check expiry
+                    expires_at = entry.get("expires_at")
+                    if expires_at and int(time.time()) > expires_at:
+                        record_bad_event(ip=ip, key=key, reason="expired_key")
+                        self.send_response(401)
+                        self.end_headers()
+                        return
+                    latched = entry.get("latched_user")
+                    # If latched, require username match
+                    if latched:
+                        if user != latched:
+                            record_bad_event(ip=ip, key=key, reason="key_user_mismatch")
+                            self.send_response(403)
+                            self.end_headers()
+                            return
+                    else:
+                        # latch to this username on first successful use
+                        entry["latched_user"] = user
+                        snapshot = json.loads(json.dumps(keys_data))
+                        def _persist_keys(s):
+                            try:
+                                save_keys_atomic(KEYS_FILE, s)
+                            except Exception:
+                                logger.exception("Async save_keys_atomic failed (latch)")
+                        threading.Thread(target=_persist_keys, args=(snapshot,), daemon=True).start()
+            else:
+                # No key provided: allow if username matches a latched key
+                matched = None
+                with keys_lock:
+                    for k, v in keys_data.get("clients", {}).items():
+                        if v.get("latched_user") == user:
+                            expires_at = v.get("expires_at")
+                            if expires_at and int(time.time()) > expires_at:
+                                continue
+                            matched = k
+                            break
+                if not matched:
+                    record_bad_event(ip=ip, key=None, reason="missing_key_and_no_latch")
+                    self.send_response(401)
+                    self.end_headers()
+                    return
+                # matched means authenticated via latched key
+
+        # Determine new_url from url_param
         if url_param and (url_param.startswith("http://") or url_param.startswith("https://")):
             new_url = url_param
             url_index_key = new_url
@@ -967,20 +1030,28 @@ class GatewayHandler(BaseHTTPRequestHandler):
         with keys_lock:
             clients = keys_data.get("clients", {})
             client_list = []
-            for k, v in clients.items():
+            for full_key, v in clients.items():
                 expires_at = v.get("expires_at")
                 expires_in_hours = None
                 if expires_at:
                     expires_in_hours = max(0, int((expires_at - now) / 3600))
                 client_list.append({
-                    "client_key_prefix": key_prefix(k),
+                    "client_key": full_key,
+                    "client_key_prefix": key_prefix(full_key),
                     "created_at": v.get("created_at"),
                     "expires_at": expires_at,
                     "expires_in_hours": expires_in_hours,
                     "last_used": v.get("last_used"),
                     "bad_events": v.get("bad_events"),
-                    "meta": v.get("meta", {})
+                    "meta": v.get("meta", {}),
+                    "latched_user": v.get("latched_user")
                 })
+        # Do not log full keys; only log that the list was requested and how many entries
+        logger.info(json.dumps({
+            "event": "list_clients_requested",
+            "admin_prefix": key_prefix(self.extract_admin_key_from_headers() or ""),
+            "client_count": len(client_list)
+        }))
         self.send_json(200, {"clients": client_list})
 
     def handle_list_bans(self):
@@ -1049,7 +1120,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                             "expires_at": expires_at,
                             "last_used": None,
                             "bad_events": 0,
-                            "meta": meta
+                            "meta": meta,
+                            "latched_user": None
                         }
                         created.append(candidate)
                         break
@@ -1240,6 +1312,61 @@ class GatewayHandler(BaseHTTPRequestHandler):
             logger.exception("handle_remove_url_post failed")
             self.send_json(500, {"error": "internal_error"})
 
+    # -------------------------
+    # Unlatch handler (admin)
+    # -------------------------
+
+    def handle_unlatch_key_post(self, body_json):
+        """
+        Admin-only: remove the latched username from a client key so it can be re-latched.
+        Body: {"client_key": "<key>"} or {"client_key_prefix": "<prefix>"} (prefix optional)
+        """
+        if not self.is_valid_admin():
+            record_bad_event(ip=self.client_address[0], key=None, reason="invalid_admin_key")
+            self.send_response(401)
+            self.end_headers()
+            return
+
+        payload = body_json or {}
+        client_key = payload.get("client_key")
+        prefix = payload.get("client_key_prefix")
+
+        unlatch_done = False
+        with keys_lock:
+            clients = keys_data.get("clients", {})
+            if client_key and client_key in clients:
+                clients[client_key]["latched_user"] = None
+                unlatch_done = True
+                snapshot = json.loads(json.dumps(keys_data))
+            elif prefix:
+                # allow unlatch by prefix (first match)
+                for k, v in clients.items():
+                    if k.startswith(prefix):
+                        v["latched_user"] = None
+                        unlatch_done = True
+                        snapshot = json.loads(json.dumps(keys_data))
+                        break
+            else:
+                snapshot = None
+
+        if unlatch_done and snapshot is not None:
+            def _persist_keys(snapshot):
+                try:
+                    save_keys_atomic(KEYS_FILE, snapshot)
+                except Exception:
+                    logger.exception("Async save_keys_atomic failed (unlatch)")
+            threading.Thread(target=_persist_keys, args=(snapshot,), daemon=True).start()
+
+            logger.info(json.dumps({
+                "event": "unlatch_key",
+                "admin_prefix": key_prefix(self.extract_admin_key_from_headers() or ""),
+                "client_key_prefix": key_prefix(client_key) if client_key else prefix
+            }))
+            self.send_json(200, {"ok": True})
+            return
+
+        self.send_json(404, {"error": "not_found"})
+
 # -------------------------
 # Signal handling and main
 # -------------------------
@@ -1271,7 +1398,8 @@ def main():
         "enable_key_ban": ENABLE_KEY_BAN,
         "ban_threshold": BAN_THRESHOLD,
         "ban_duration_seconds": BAN_DURATION_SECONDS,
-        "bad_event_decay_seconds": BAD_EVENT_DECAY_SECONDS
+        "bad_event_decay_seconds": BAD_EVENT_DECAY_SECONDS,
+        "latch_client_keys": LATCH_CLIENT_KEYS
     }))
 
     load_keys()

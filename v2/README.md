@@ -18,7 +18,8 @@ V2 now includes optional WAN‑safe security features so you can keep your REAL 
 - Admin endpoints for logs, stats, and cache control  
 - Graceful shutdown with log rotation  
 - No file generation required  
-- **Optional authentication system (client keys + admin key)**  
+- **Optional authentication system (client keys + admin key)**
+- **Optional Client/Key Latching system, ensures 1 key/1 user
 - **IP and Key ban system with decay + auto‑expiration**  
 - **Persistent bans stored in `/output/bans.json`**  
 - **Request‑line length protection (anti‑flood / anti‑TLS‑probe)**  
@@ -57,6 +58,30 @@ Enable with:
 
 Clients must include: `key=YOUR_ACCESS_KEY`
 
+### Latching Client Keys
+- When enabled, the first successful request that includes a new/valid client key and a username, binds (latches) that key to that username. 
+- After latching:
+  - That key can only be used with the latched username.
+  - A request that supplies only the username (no key) is allowed if a non‑expired key is latched to that username.
+  - Admins can unlatch a key to clear the binding (useful for typos or transfers).
+  - Prevents a single client key from being shared across many end users (reseller abuse) while keeping onboarding simple: issue a key once, first use binds it.
+- First Use:
+```
+curl "http://<HOST>:<PORT>/get?user=alice&pass=secret&url=1&key=<CLIENT_KEY>"
+# first successful request binds <CLIENT_KEY> → "alice"
+```
+- Access After Latching:
+```
+# If <CLIENT_KEY> is latched to "alice", this will succeed without the key:
+curl "http://<HOST>:<PORT>/get?user=alice&pass=secret&url=1"
+```
+- Unlatch a key (admin) 
+```
+curl -H "Authorization: Admin <ADMIN_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"client_key_prefix":"abcd1234"}' \
+  "http://<HOST>:<PORT>/unlatch_key"
+```
 
 ## Admin access and key based auth
 
@@ -72,17 +97,34 @@ Use the included `admin-helper` script to perform admin tasks (list clients, add
 - Enter your `ADMIN_KEY` when the script launches.
 - Run on Windows (PowerShell or cmd) or Git Bash.
 
-**Endpoints**
+**Admin Endpoints**
 - `GET /health` — health and stats
 - `GET /clients` — list client keys
-- `POST /add_key` — add client key(s) (admin auth required)
-- `POST /remove_key` — remove a client key (admin auth required)
+- `POST /add_key` — add client key(s)
+- `POST /remove_key` — remove a client key
+- `POST /unlatch_key` — clear a key’s `latched_user`
+- `GET /urls` — list dynamic URLs (from urls.json).
+- `POST /add_url` — add fixed URL.
+- `POST /remove_url` — remove fixed URL
 - `GET /bans` — list bans
-- `POST /remove_ban` — remove a ban (admin auth required)
-- `GET /clear_cache` — clear server cache (admin auth required)
-- `GET /urls` — list preset URLs (admin only) 
+- `POST /remove_ban` — remove a ban 
+- `GET /clear_cache` — clear server cache
+- `GET /urls` — list preset URLs 
 - `POST /add_url` — add a preset URL 
 - `POST /remove_url` — remove a URL
+
+**Admin Endpoints - No Helper Tool**
+- Admin endpoints can be used in various ways; if `REQUIRE_AUTH_KEYS = false` in the docker compose file,
+  - Admins can simply visit http://host:PORT/health</SERVERIP>
+- If `REQUIRE_AUTH_KEYS = true`, admins key must be declared in the docker compose file and will be used to access all endpoints
+  - Admin keys are passed to the server via structured http requests with the admin key contained inside the headers, and data contained within the body of the request
+  - i.e.
+  ```
+  curl -H "Authorization: Admin <ADMIN_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"expires_hours":24,"meta":{"note":"issued to Alice"}}' \
+  "http://<HOST>:<PORT>/add_key"
+  ```
 
 ---
 
@@ -169,6 +211,7 @@ Without authentication:
 - `REQUIRE_AUTH_KEYS=true|false`  
 - `ADMIN_KEY=xxxx`  
 - `ACCESS_KEYS=ABC123,DEF456,...` #Fixed/Legacy Client Access Keys (optional)
+- `LATCH_CLIENT_KEYS=true` # enable latching (false = legacy behavior)
 
 ### Ban System
 
@@ -222,17 +265,18 @@ services:
       - RATE_LIMIT_WINDOW_SECONDS=60 #duration of time requests are counted i.e. 60 requests in 60 seconds = 1 request per second
 
       # Authentication (optional)
-      - REQUIRE_AUTH_KEYS=true
-      - ADMIN_KEY=ADMIN123456789
-      - KEY_LENGTH=32
-      - KEYS_CLEANUP_INTERVAL=60
+      - REQUIRE_AUTH_KEYS=true #Enforce the use of Admin_keys on all endpoints, and client keys on file generation 
+      - LATCH_CLIENT_KEYS=true # Latch the client_key, to the clients provided username; Client keys can only be used with 1 account
+      - ADMIN_KEY=ADMIN123456789 #Set a STRONG admin key!
+      - KEY_LENGTH=32 #Length of generated client keys
+      - KEYS_CLEANUP_INTERVAL=60 #Check every __seconds for expired keys
       
       # Legacy/Fixed client access keys (optional, comma separated)
       #- ACCESS_KEYS=GUEST
 
       # Ban System (optional)
-      - ENABLE_IP_BAN=true
-      - ENABLE_KEY_BAN=true
+      - ENABLE_IP_BAN=true #Temp Ban IP Addresses for Abuse
+      - ENABLE_KEY_BAN=true #Temp Ban Client Keys for Abuse
       - BAN_THRESHOLD=10 #Bad events accumulated before being banned
       - BAN_DURATION_SECONDS=3600 #Ban for 1 hour
       - BAD_EVENT_DECAY_SECONDS=900 #Bad events removed after xx seconds
