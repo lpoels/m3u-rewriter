@@ -99,6 +99,7 @@ Use the included `admin-helper` script to perform admin tasks (list clients, add
 
 **Admin Endpoints**
 - `GET /health` — health and stats
+- `GET /log` — Print the last 200 lines of Container Log
 - `GET /clients` — list client keys
 - `POST /add_key` — add client key(s)
 - `POST /remove_key` — remove a client key
@@ -109,9 +110,7 @@ Use the included `admin-helper` script to perform admin tasks (list clients, add
 - `GET /bans` — list bans
 - `POST /remove_ban` — remove a ban 
 - `GET /clear_cache` — clear server cache
-- `GET /urls` — list preset URLs 
-- `POST /add_url` — add a preset URL 
-- `POST /remove_url` — remove a URL
+
 
 **Admin Endpoints - No Helper Tool**
 - Admin endpoints can be used in various ways; if `REQUIRE_AUTH_KEYS = false` in the docker compose file,
@@ -171,15 +170,19 @@ Enable with:
 
 With authentication:
 
-- `http://<server>:8080/get?key=ABC123&user=alice&pass=secret&url=1`
+- `http://<server>:8080/get?key=ABC123&user=alice&pass=secret` #Uses URL1 by Default
 - OR
-- `http://<server>:8080/get?key=ABC123&user=alice&pass=secret&url=http://example.com`
+- `http://<server>:8080/get?key=ABC123&user=alice&pass=secret&url=1` #Declare Fixed URL
+- OR
+- `http://<server>:8080/get?key=ABC123&user=alice&pass=secret&url=http://example.com` #Set Custom URL
 
 Without authentication:
 
-- `http://<server>:8080/get?user=alice&pass=secret&url=1`
+- `http://<server>:8080/get?user=alice&pass=secret` #Uses URL1 by Default
 - OR
-- `http://<server>:8080/get?user=alice&pass=secret&url=http://example.com`
+- `http://<server>:8080/get?user=alice&pass=secret&url=1` #Declare Fixed URL
+- OR
+- `http://<server>:8080/get?user=alice&pass=secret&url=http://example.com` #Set Custom URL
 
 ---
 
@@ -209,9 +212,10 @@ Without authentication:
 ### Authentication
 
 - `REQUIRE_AUTH_KEYS=true|false`  
-- `ADMIN_KEY=xxxx`  
-- `ACCESS_KEYS=ABC123,DEF456,...` #Fixed/Legacy Client Access Keys (optional)
 - `LATCH_CLIENT_KEYS=true` # enable latching (false = legacy behavior)
+- `ADMIN_KEY=xxxx`
+- `KEY_LENGTH=8`
+- `KEYS_CLEANUP_INTERVAL=60`
 
 ### Ban System
 
@@ -270,9 +274,6 @@ services:
       - ADMIN_KEY=ADMIN123456789 #Set a STRONG admin key!
       - KEY_LENGTH=32 #Length of generated client keys
       - KEYS_CLEANUP_INTERVAL=60 #Check every __seconds for expired keys
-      
-      # Legacy/Fixed client access keys (optional, comma separated)
-      #- ACCESS_KEYS=GUEST
 
       # Ban System (optional)
       - ENABLE_IP_BAN=true #Temp Ban IP Addresses for Abuse

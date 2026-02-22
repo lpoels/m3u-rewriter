@@ -853,7 +853,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
         password = query.get("pass", [None])[0]
         url_param = query.get("url", [None])[0]
 
-        if not user or not password or not url_param:
+        # --- NEW: default url to "1" when omitted by client ---
+        if not url_param:
+            url_param = "1"
+        # --- END NEW ---
+
+        if not user or not password:
             record_bad_event(ip=ip, key=key, reason="missing_parameters")
             self.send_response(400)
             self.end_headers()
@@ -933,18 +938,36 @@ class GatewayHandler(BaseHTTPRequestHandler):
             url_index_key = new_url
             filename_suffix = "custom"
         else:
+            # Accept forms like "URL1", "url2", or numeric "1", "2"
             try:
-                idx = int(url_param[3:]) if url_param.upper().startswith("URL") else int(url_param)
+                if isinstance(url_param, str) and url_param.upper().startswith("URL"):
+                    idx = int(url_param[3:])
+                else:
+                    idx = int(url_param)
             except Exception:
                 record_bad_event(ip=ip, key=key, reason="invalid_url_param")
                 self.send_response(400)
                 self.end_headers()
                 return
 
+            # If requested index does not exist, return 422 Unprocessable Content
             if idx < 1 or idx > len(NEW_URLS):
-                record_bad_event(ip=ip, key=key, reason="url_index_out_of_range")
-                self.send_response(400)
+                logger.info(json.dumps({
+                    "event": "unprocessable_url_index",
+                    "ip": ip,
+                    "requested_index": idx,
+                    "available_count": len(NEW_URLS)
+                }))
+                self.send_response(422)
+                self.send_header("Content-Type", "application/json")
                 self.end_headers()
+                try:
+                    self.wfile.write(json.dumps({
+                        "error": "unprocessable_content",
+                        "message": f"url index {idx} not declared"
+                    }).encode("utf-8"))
+                except Exception:
+                    pass
                 return
 
             new_url = NEW_URLS[idx - 1]

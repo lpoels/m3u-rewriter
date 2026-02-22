@@ -7,7 +7,7 @@
 # - Optional ban test runs last and requires explicit confirmation.
 #
 # Usage:
-#   GATEWAY="http://10.8.2.4:8080" ADMIN_KEY="Adm1nT3stKey_ForLocalUseOnly_2026" \
+#   GATEWAY="http://10.8.2.4:8080" ADMIN_KEY="REPLACEME" \
 #     CONTAINER="m3u_rewriter_v2_test" OUTDIR="/output" ./tests/run_all_functions_test.sh
 #
 set -euo pipefail

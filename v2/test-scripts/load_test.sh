@@ -4,7 +4,7 @@
 set -euo pipefail
 
 GATEWAY="${GATEWAY:-http://10.8.2.4:8080}"
-ADMIN_KEY="${ADMIN_KEY:-Adm1nT3stKey_ForLocalUseOnly_2026}"
+ADMIN_KEY="${ADMIN_KEY:-REPLACEME}"
 PAR="${PAR:-20}"
 ITERS="${ITERS:-100}"
 TMPDIR="${TMPDIR:-/tmp/m3u_test}"

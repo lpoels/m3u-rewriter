@@ -62,16 +62,8 @@ A real‑time gateway that rewrites playlists on demand.
 | Want admin endpoints (/log, /health) | | ✅ |
 | Need WAN‑safe protections | | ✅ |
 
-Both versions are valid — the right choice depends on your environment.
-
----
-
-## 📁 Repository Structure
-/v1     → File‑based playlist rewriter (scheduled generation)
-/v2     → Dynamic gateway (on‑demand rewriting)
-/output → Runtime logs and generated files (Docker volume)
-
-Each version includes its own README with installation instructions and examples.
+- Both versions are valid — the right choice depends on your environment.
+- Each version includes its own README with installation instructions and examples.
 
 ---
 

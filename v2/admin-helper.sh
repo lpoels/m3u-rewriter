@@ -150,7 +150,49 @@ cmd_remove_ban() {
 }
 
 cmd_clear_cache() {
-  _do_curl GET "/clear_cache" | pretty_print
+  # Call the admin endpoint but avoid letting set -e abort the whole script.
+  local tmp tmp_status curl_exit http_status
+  tmp="$(mktemp)"
+  tmp_status="$(mktemp)"
+  # Temporarily disable errexit for the curl call to capture its exit code safely
+  set +e
+  curl $CURL_OPTS -X GET -H "$(_auth_header)" "${BASE_URL}/clear_cache" -o "$tmp" -w "%{http_code}" >"$tmp_status" 2>/dev/null
+  curl_exit=$?
+  set -e
+  http_status="$(cat "$tmp_status" 2>/dev/null || echo "000")"
+
+  if [ "$curl_exit" -ne 0 ]; then
+    echo "Warning: clear_cache request failed to complete (network or timeout)."
+    echo "Check the server logs in Portainer for details."
+    rm -f "$tmp" "$tmp_status"
+    return 0
+  fi
+
+  if [ "$http_status" = "200" ]; then
+    echo "Cache Cleared"
+    if [ -s "$tmp" ]; then
+      echo "Server response:"
+      if [ -n "$JQ_BIN" ]; then
+        cat "$tmp" | jq .
+      else
+        cat "$tmp"
+      fi
+    fi
+  else
+    echo "Clear cache returned HTTP $http_status"
+    if [ -s "$tmp" ]; then
+      echo "Server response:"
+      if [ -n "$JQ_BIN" ]; then
+        cat "$tmp" | jq .
+      else
+        cat "$tmp"
+      fi
+    fi
+  fi
+
+  rm -f "$tmp" "$tmp_status"
+  # Return normally so the interactive loop continues and prompts the admin
+  return 0
 }
 
 print_menu() {
