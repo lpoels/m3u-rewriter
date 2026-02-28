@@ -57,7 +57,8 @@ cmd_list_clients() {
   _do_curl GET "/clients" | pretty_print
 }
 
-cmd_add_key() {
+# Original single-key logic extracted here
+cmd_add_key_single() {
   local payload="${1:-}"
   if [ -z "$payload" ]; then
     read -r -p "Expires hours [1]: " expires
@@ -66,6 +67,75 @@ cmd_add_key() {
     payload=$(printf '{"expires_hours":%s,"meta":{"note":"%s"}}' "$expires" "$(echo "$note" | sed 's/"/\\"/g')")
   fi
   _do_curl POST "/add_key" "$payload" | pretty_print
+}
+
+# New bulk-key logic
+cmd_add_key_bulk() {
+  local count expires note confirm i payload tmp BULK_RATE_PER_SEC sleep_interval
+  BULK_RATE_PER_SEC=5
+  sleep_interval="$(awk "BEGIN {print 1.0/$BULK_RATE_PER_SEC}")"
+
+  echo "Bulk Client Key Creation"
+  read -r -p "How many keys to create? " count
+  count="${count:-0}"
+  if ! printf "%s" "$count" | grep -qE '^[0-9]+$' || [ "$count" -le 0 ]; then
+    echo "Invalid count"
+    return 0
+  fi
+
+  read -r -p "Expires hours for each key [1]: " expires
+  expires="${expires:-1}"
+  read -r -p "Note (optional): " note
+
+  echo "You are about to create $count keys (rate fixed at ${BULK_RATE_PER_SEC}/sec)."
+  read -r -p "Confirm (y/N): " confirm
+  case "${confirm:-N}" in
+    y|Y) ;;
+    *) echo "Cancelled"; return 0 ;;
+  esac
+
+  tmp="$(mktemp)"
+  echo "Creating keys..."
+  for i in $(seq 1 "$count"); do
+    payload=$(printf '{"expires_hours":%s,"meta":{"note":"%s"}}' "$expires" "$(echo "$note" | sed 's/"/\\"/g')")
+    # Capture each response in the temp file
+    _do_curl POST "/add_key" "$payload" >>"$tmp"
+    echo >>"$tmp"
+    printf "Created %d/%d\r" "$i" "$count"
+    sleep "$sleep_interval"
+  done
+  echo
+  echo "Bulk creation complete. Full server responses:"
+  if [ -s "$tmp" ]; then
+    if [ -n "$JQ_BIN" ]; then
+      cat "$tmp" | jq .
+    else
+      cat "$tmp"
+    fi
+  else
+    echo "(No responses captured.)"
+  fi
+  rm -f "$tmp"
+}
+
+# Dispatcher: preserves non-interactive behavior and adds interactive bulk option
+cmd_add_key() {
+  local payload="${1:-}"
+  # Non-interactive mode (payload provided) -> behave exactly as before
+  if [ -n "$payload" ]; then
+    cmd_add_key_single "$payload"
+    return 0
+  fi
+
+  echo "Add Client Keys"
+  echo "1) Add a single key"
+  echo "2) Add bulk keys"
+  read -r -p "Choose an option (1/2): " mode
+  case "$mode" in
+    1) cmd_add_key_single ;;
+    2) cmd_add_key_bulk ;;
+    *) echo "Invalid choice";;
+  esac
 }
 
 cmd_remove_key() {
